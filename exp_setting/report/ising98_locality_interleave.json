@@ -1,0 +1,19 @@
+{
+  "qasm_list": ["benchmark/hpca/ising_n98_transpiled.qasm"],
+  "zac_setting": [
+    {
+      "arch_spec": "hardware_spec/small_architecture_2Ryd.json",
+      "dependency": true,
+      "dir": "result/zac/ising98/locality_interleave/",
+      "routing_strategy": "maximalis_sort",
+      "trivial_placement": false,
+      "dynamic_placement": true,
+      "use_window": true,
+      "window_size": 1000,
+      "use_verifier": true,
+      "interleave_reverse": true
+    }
+  ],
+  "simulation": true,
+  "animation": false
+}

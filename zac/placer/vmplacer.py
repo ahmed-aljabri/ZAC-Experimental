@@ -8,13 +8,15 @@ from copy import deepcopy
 class VertexMatchingPlacer:
     """class to find a qubit layout via SA."""
 
-    def __init__(self, mapping: list, l2: bool = False):
+    def __init__(self, mapping: list, l2: bool = False, keep_hot: bool = False, keep_hot_penalty: float = 0.0):
         self.mapping = [mapping]
         self.l2 = l2
         self.print_detail = False
         # self.cost_atom_transfer = pow(0.999, 2)
         self.cost_atom_transfer = 0.9999
         self.n_qubit = len(mapping)
+        self.keep_hot = keep_hot
+        self.keep_hot_penalty = keep_hot_penalty
 
     def run(self, architecture, qubit_mapping, list_gate, dynamic_placement, list_reuse_qubits):
         self.architecture = architecture
@@ -263,11 +265,21 @@ class VertexMatchingPlacer:
                     dis3 = self.architecture.distance(qubit_mapping[q3][0], qubit_mapping[q3][1], qubit_mapping[q3][2], site[0], site[1], site[2])
                 list_row_coo.append(idx_rydberg)
                 list_col_coo.append(i)
-                # print("add edge site {} to gate {}".format(idx_rydberg, i))
-                if qubit_mapping[q1][1] == qubit_mapping[q2][1] and qubit_mapping[q1][0] == qubit_mapping[q2][0]:
-                    list_data.append(math.sqrt(max(dis1, dis2)) + math.sqrt(dis3))
-                else:
-                    list_data.append(math.sqrt(dis1) + math.sqrt(dis2) + math.sqrt(dis3))
+                base_cost = math.sqrt(max(dis1, dis2)) + math.sqrt(dis3) if (qubit_mapping[q1][1] == qubit_mapping[q2][1] and qubit_mapping[q1][0] == qubit_mapping[q2][0]) else (math.sqrt(dis1) + math.sqrt(dis2) + math.sqrt(dis3))
+                if self.keep_hot and test_reuse:
+                    penalty = 0
+                    if q1 in self.list_reuse_qubit[layer - 1]:
+                        prev_zone = self.architecture.dict_SLM[gate_mapping[q1][0]].entanglement_id
+                        new_zone = self.architecture.dict_SLM[site[0]].entanglement_id
+                        if prev_zone != new_zone:
+                            penalty += self.keep_hot_penalty
+                    if q2 in self.list_reuse_qubit[layer - 1]:
+                        prev_zone = self.architecture.dict_SLM[gate_mapping[q2][0]].entanglement_id
+                        new_zone = self.architecture.dict_SLM[site[0]].entanglement_id
+                        if prev_zone != new_zone:
+                            penalty += self.keep_hot_penalty
+                    base_cost += penalty
+                list_data.append(base_cost)
                 
         # input()
         # if there is no enough site for all gates

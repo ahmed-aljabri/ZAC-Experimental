@@ -32,6 +32,15 @@ class ZAC(Scheduler_mixin, Placer_mixin, Router_mixin, Verifier_mixin, Animator)
         self.reuse = True
         self.resyn = True
         self.common_1q = 0
+        # optional policies
+        self.zone_batched_routing = False
+        self.locality_reorder = False
+        self.locality_cluster_split = False
+        self.interleave_reverse = False
+        self.keep_hot = False
+        self.keep_hot_penalty = 0.0
+        self.keep_hot_horizon = 0
+        self.zone_affinity = False
 
     def parse_setting(self, setting: dict):
         if "name" in setting:
@@ -60,6 +69,22 @@ class ZAC(Scheduler_mixin, Placer_mixin, Router_mixin, Verifier_mixin, Animator)
             self.scheduling_strategy = setting["scheduling"]
         if "resyn" in setting:
             self.resyn = setting["resyn"]
+        if "zone_batched_routing" in setting:
+            self.zone_batched_routing = setting["zone_batched_routing"]
+        if "locality_reorder" in setting:
+            self.locality_reorder = setting["locality_reorder"]
+        if "locality_cluster_split" in setting:
+            self.locality_cluster_split = setting["locality_cluster_split"]
+        if "interleave_reverse" in setting:
+            self.interleave_reverse = setting["interleave_reverse"]
+        if "keep_hot" in setting:
+            self.keep_hot = setting["keep_hot"]
+        if "keep_hot_penalty" in setting:
+            self.keep_hot_penalty = setting["keep_hot_penalty"]
+        if "keep_hot_horizon" in setting:
+            self.keep_hot_horizon = setting["keep_hot_horizon"]
+        if "zone_affinity" in setting:
+            self.zone_affinity = setting["zone_affinity"]
     
     def set_architecture_spec_path(self, path: str):
         self.result_json['architecture_spec_path'] = path
@@ -224,6 +249,8 @@ class ZAC(Scheduler_mixin, Placer_mixin, Router_mixin, Verifier_mixin, Animator)
 
         if self.reuse:
             self.collect_reuse_qubit()
+            if self.keep_hot and self.keep_hot_horizon > 0:
+                self.extend_keep_hot_gap()
         else:
             self.reuse_qubit = [set() for i in range(len(self.gate_scheduling))]
         # print("result_scheduling")
@@ -303,6 +330,25 @@ class ZAC(Scheduler_mixin, Placer_mixin, Router_mixin, Verifier_mixin, Animator)
             # print(self.reuse_qubit[-1])
             # input()
         self.reuse_qubit.append(set())
+
+    def extend_keep_hot_gap(self):
+        """
+        Keep qubits hot across limited gaps: if a qubit appears again within keep_hot_horizon layers,
+        mark it for reuse across the intervening layers.
+        """
+        occ = [[] for _ in range(self.n_q)]
+        for layer_idx, gates in enumerate(self.gate_scheduling):
+            for gate in gates:
+                for q in gate:
+                    occ[q].append(layer_idx)
+        for q, layers in enumerate(occ):
+            for i in range(len(layers) - 1):
+                cur = layers[i]
+                nxt = layers[i + 1]
+                gap = nxt - cur
+                if 0 < gap <= self.keep_hot_horizon + 1:
+                    for k in range(cur, min(nxt, len(self.reuse_qubit) - 1)):
+                        self.reuse_qubit[k].add(q)
     
 
 

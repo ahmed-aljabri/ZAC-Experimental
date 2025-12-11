@@ -1,27 +1,45 @@
-# ZAC Compiler
-Compilation for zoned architectures based on neutral atom arrays.
-Open source under the BSD 3-Clause license.
+# ZAC (fork) — Compiler Experiments for Zoned Neutral-Atom Architectures
 
-## Logistics
-- We recommend to run the compiler in a Python3 virtual environment.
-- `qiskit` is used to parse QASM files and transpile circuits to the hardware-supported gates, i.e., CZ, U3.
-- Install [ffmpeg](https://www.ffmpeg.org) for animation generation
+> This repository is a **fork** of the original ZAC compiler by **UCLA-VAST**.  
+> Upstream: https://github.com/UCLA-VAST/ZAC  
+> This fork is not affiliated with or endorsed by the upstream authors.
 
-## Repo structure
-- `run.py` is an example of using the compiler on a circuit. Refer to `python run.py -h` for options.
-- `zac/` contains the source files implementing ZAC.
-- `exp_setting/` is the directory containing example of experimental setting. See `exp_setting/README.md` for more inforamtion.
-- `hardware_spec/` is the directory containing the example for zoned architecture specficiation. See `hardware_spec/README.md` for more inforamtion.
-- `benchmark/` is the directory containing the circuit examples from QASMBench.
-- `results/zac/` is the default directory for the results.
-  - `results/zac/code/` contains the ZAIR files generated from compilation results.
-  - `results/zac/animations/` contains animation generated from ZAIR.
-  - `results/zac/fidelity/` contains fidelity estimation based on code files.
+This fork preserves ZAC’s physics models and core compilation flow, and adds **optional, compiler-side policies** for research experiments (all disabled by default). Examples include zone-batched routing, locality-aware in-layer reordering, reverse interleaving, keep-hot bias with a horizon, and zone-affinity for multi-AOD.
 
-## How to use
-- Run `python run.py <S>` where `<S>` is the json file for experimental setting.
+For a detailed list of modifications and how to use them, see **`README_changes.md`**.
 
-## Publication
+---
+
+## License & Attribution
+
+- Licensed under the **BSD-3-Clause** license; see **`LICENSE`** at the repository root.
+---
+
+
+## Getting Started
+- Use Python 3 in a virtual environment.
+- Install dependencies: `python3 -m pip install -r requirements.txt`
+- (Optional) Install `ffmpeg` if you want animation generation.
+
+## Running the Compiler
+Run an experiment JSON (e.g., Ising98 baseline):
+```
+python run.py exp_setting/report/ising98_baseline.json
+```
+Results (code/fidelity/time) are written under `result/...`.
+
+To toggle the experimental policies, edit the policy file referenced by the experiment (e.g., `exp_setting/report/ising98_policies.json`) or supply a different policy file. Flags include zone-batched routing, locality-aware reorder, reverse interleave, keep-hot with horizon, and zone affinity. Details are in `README_changes.md`.
+
+## Repository Structure (high level)
+- `zac/` – compiler source (scheduler, placer, router, verifier, animator).
+- `exp_setting/` – experiment and policy JSONs.
+- `hardware_spec/` – architecture specs.
+- `benchmark/` – example circuits.
+- `result/` – outputs (code, fidelity, time, animations).
+- `tools/` – diagnostics (zone switches, shuttle counts, QAOA generator, etc.).
+
+## References
+Original ZAC publication:
 ```
 @inproceedings{lin2025reuse,
   title={Reuse-aware compilation for zoned quantum architectures based on neutral atoms},

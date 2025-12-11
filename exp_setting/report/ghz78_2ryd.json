@@ -1,0 +1,18 @@
+{
+  "qasm_list": ["benchmark/hpca/ghz_n78_transpiled.qasm"],
+  "zac_setting": [
+    {
+      "arch_spec": "hardware_spec/small_architecture_2Ryd.json",    
+      "dependency": true,
+      "dir": "result/zac/ghz78/2ryd1aod/",
+      "routing_strategy": "maximalis_sort",
+      "trivial_placement": false,
+      "dynamic_placement": true,
+      "use_window": true,
+      "window_size": 1000,
+      "use_verifier": true
+    }
+  ],
+  "simulation": true,
+  "animation": false
+}

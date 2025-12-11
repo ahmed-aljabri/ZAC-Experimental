@@ -19,10 +19,7 @@ class Router_mixin:
         """
         generate rearrangement layers between two Rydberg layers
         """
-        # for mapping in self.qubit_mapping:
-        #     print(mapping)
-        self.aod_end_time = [(0, i) for i in range(len(self.architecture.dict_AOD))]
-        self.aod_dependency = [0 for i in range(len(self.architecture.dict_AOD))]
+        self._init_aod_heaps()
         self.rydberg_dependency = [0 for i in range(len(self.architecture.entanglement_zone))]
         time_mis = 0
         self.qubit_dependency = [0 for i in range(self.n_q)]
@@ -44,7 +41,6 @@ class Router_mixin:
         """
         process layers of movement from storage zone to Rydberg and back to storage zone
         """
-        # layer_time = [] # use to record the solving time per layer
         initial_mapping = self.qubit_mapping[2 * layer]
         gate_mapping = self.qubit_mapping[2 * layer+1]
         if layer + 2 < len(self.qubit_mapping):
@@ -52,15 +48,11 @@ class Router_mixin:
         else:
             final_mapping = None
 
-        # sort remain_graph based on qubit distance if using maximal is
         remain_graph = [] # consist qubits to be moved
         for gate in self.gate_scheduling[layer]:
             for q in gate:
                 if initial_mapping[q] != gate_mapping[q]:
-                    assert(initial_mapping[q][0] == 0 or gate_mapping[q][0] == 0)
                     remain_graph.append(q)
-            # remain_graph.append(gate[0])
-            # remain_graph.append(gate[1])
         
         if not(self.routing_strategy == "mis" or self.routing_strategy == "maximalis"):
             remain_graph = sorted(remain_graph, key=lambda x: (math.dist(self.architecture.exact_SLM_location_tuple(initial_mapping[x]),\
@@ -68,33 +60,13 @@ class Router_mixin:
         
         id_layer_start = len(self.result_json['instructions'])
         batch = 0
-        while remain_graph:
-            # graph construction
-            vectors = self.graph_construction(remain_graph, initial_mapping, gate_mapping)
-            # collect violation
-            violations = self.collect_violation(vectors)
-            # solve MIS
-            if self.routing_strategy == "mis":
-                moved_qubits = self.kamis_solve(len(vectors), violations, batch)
-            else:
-                moved_qubits = self.maximalis_solve(len(vectors), violations)
-
-            set_aod = {remain_graph[i] for i in moved_qubits} # use to record aods per movement layer
-            self.process_movement_layer(set_aod, initial_mapping, gate_mapping)
-            tmp = [q for q in remain_graph if q not in set_aod]
-            remain_graph = tmp
-            batch += 1
-            # print("time for post processsing: {}".format(time.time() - t_tmp))
-            # layer_time.append(float(time.time() - start_time))
+        batch = self._process_movement_batches(remain_graph, initial_mapping, gate_mapping, batch)
 
         # append a layer for gate execution 
         self.process_gate_layer(layer, gate_mapping)
         # move qubit back to the final location
         if final_mapping is not None:
             if self.dynamic_placement or self.reuse:
-                # print("find reverse movement")
-                # print(gate_mapping)
-                # print(final_mapping)
                 remain_graph = [] # consist qubits to be moved
                 for gate in self.gate_scheduling[layer]:
                     for q in gate:
@@ -104,87 +76,98 @@ class Router_mixin:
                 if not(self.routing_strategy == "mis" or self.routing_strategy == "maximalis"):
                     remain_graph = sorted(remain_graph, key=lambda x: (math.dist(self.architecture.exact_SLM_location_tuple(final_mapping[x]), \
                                                                                 self.architecture.exact_SLM_location_tuple(gate_mapping[x]))), reverse=True)
-                while remain_graph:                
-                    # graph construction
-                    vectors = self.graph_construction(remain_graph, final_mapping, gate_mapping)
-                    # collect violation
-                    violations = self.collect_violation(vectors)
-                    # print("remain_graph")
-                    # print(remain_graph)
-                    # print("vectors")
-                    # print(vectors)
-                    # print("violations")
-                    # print(violations)
-                    # input()
-
-                    if self.routing_strategy == "mis":
-                        moved_qubits = self.kamis_solve(len(vectors), violations, batch)
-                    else:
-                        moved_qubits = self.maximalis_solve(len(vectors), violations)
-                    # todo: add layer
-                    set_aod = {remain_graph[i] for i in moved_qubits} # use to record aods per movement layer
-                    self.process_movement_layer(set_aod, gate_mapping, final_mapping)
-                    
-                    tmp = [q for q in remain_graph if q not in set_aod]
-                    remain_graph = tmp
-                    batch += 1
+                if getattr(self, "interleave_reverse", False):
+                    stats = []
+                    batch = self._process_movement_batches(remain_graph, gate_mapping, final_mapping, batch, stats)
+                    avg_moves = (sum(stats) / len(stats)) if stats else 0
+                    print(f"[TRACE] reverse stage {layer}: batches={len(stats)}, avg_moves_per_batch={avg_moves:.2f}")
+                else:
+                    batch = self._process_movement_batches(remain_graph, gate_mapping, final_mapping, batch)
             else:
                 # construct reverse layer
                 self.construct_reverse_layer(id_layer_start, gate_mapping, final_mapping)
             self.aod_assignment(id_layer_start)
                 
     
+    def _process_movement_batches(self, remain_graph: list, initial_mapping: list, final_mapping: list, batch_start: int, stats: list = None):
+        """
+        Run routing batches either in a single mixed set or grouped by entanglement zone.
+        """
+        if not remain_graph:
+            return batch_start
+
+        if not getattr(self, "zone_batched_routing", False):
+            return self._process_single_batch_group(remain_graph, initial_mapping, final_mapping, batch_start, stats)
+
+        zone_to_qubits = dict()
+        for q in remain_graph:
+            zone_id = self._movement_zone_id(initial_mapping[q], final_mapping[q])
+            if zone_id not in zone_to_qubits:
+                zone_to_qubits[zone_id] = []
+            zone_to_qubits[zone_id].append(q)
+
+        batch = batch_start
+        for zone_id in sorted(zone_to_qubits.keys()):
+            batch = self._process_single_batch_group(zone_to_qubits[zone_id], initial_mapping, final_mapping, batch, stats)
+        return batch
+
+    def _process_single_batch_group(self, remain_graph: list, initial_mapping: list, final_mapping: list, batch_start: int, stats: list = None):
+        """
+        Core MIS/maximal-IS batching loop for a list of movements.
+        """
+        batch = batch_start
+        pending_qubits = list(remain_graph)
+        while pending_qubits:
+            vectors = self.graph_construction(pending_qubits, initial_mapping, final_mapping)
+            violations = self.collect_violation(vectors)
+            if self.routing_strategy == "mis":
+                moved_qubits = self.kamis_solve(len(vectors), violations, batch)
+            else:
+                moved_qubits = self.maximalis_solve(len(vectors), violations)
+
+            set_aod = {pending_qubits[i] for i in moved_qubits} # use to record aods per movement layer
+            self.process_movement_layer(set_aod, initial_mapping, final_mapping)
+            if stats is not None:
+                stats.append(len(set_aod))
+            pending_qubits = [q for q in pending_qubits if q not in set_aod]
+            batch += 1
+        return batch
+
+    def _movement_zone_id(self, start_loc: tuple, target_loc: tuple):
+        """
+        Choose the entanglement zone driving a move. Prefer the target zone when present,
+        otherwise fall back to the source (for reverse moves back to storage).
+        """
+        zone_to = self.architecture.dict_SLM[target_loc[0]].entanglement_id
+        if zone_to != -1:
+            return zone_to
+        return self.architecture.dict_SLM[start_loc[0]].entanglement_id
+    
     def graph_construction(self, remain_graph: list, initial_mapping: list, final_mapping: list):
-        # t_tmp = time.time()
         vectors = []
         if self.use_window:
             vector_length = min(self.window_size, len(remain_graph))
         else:
             vector_length = len(remain_graph)
         vectors = [(0,0,0,0, ) for _ in range(vector_length)]
-        # t_tmp = time.time()
-        i = 0
-        # i12 = -1
-        # i69 = -1
         for i, q in enumerate(remain_graph):
             (q_x, q_y) = self.architecture.exact_SLM_location_tuple(initial_mapping[q])
             (site_x, site_y) = self.architecture.exact_SLM_location_tuple(final_mapping[q])
             vectors[i] = (q_x, site_x, q_y, site_y, )
-            # if q == 12 and 69 in remain_graph:
-                # print(12)
-                # print(initial_mapping[q])
-                # print(final_mapping[q])
-                # print(vectors[i])
-                # i12 = i 
-            # if q == 69 and 12 in remain_graph:
-                # print(69)
-                # print(initial_mapping[q])
-                # print(final_mapping[q])
-                # print(vectors[i])
-                # i69 = i 
-        # if i12 > -1 and i69 > -1:
-        #     print(self.compatible_2D(vectors[i12], vectors[i69]))
-        #     input()
-        # print("time for graph construction: {}".format(time.time() - t_tmp))
-        # print("number of violation: {}".format(len(violations)))
         return vectors
     
     def collect_violation(self, vectors: list):
-        # t_tmp = time.time()
         violations = []
         for i in range(len(vectors)):
             for j in range(i+1, len(vectors)):
                 if not self.compatible_2D(vectors[i], vectors[j]):
                     violations.append((i, j))
-        # print("time for violation checking: {}".format(time.time() - t_tmp))
         return violations
 
     def maximalis_solve(self, n, edges):
         """
         solve maximal independent set
         """
-        # t_tmp = time.time()
-        # assum the vertices are sorted based on qubit distance
         is_node_conflict = [False for _ in range(n)]
         node_neighbors = {i: [] for i in range(n)}
         for edge in edges:
@@ -198,14 +181,12 @@ class Router_mixin:
                 result.append(i)
                 for j in node_neighbors[i]:
                     is_node_conflict[j] = True
-        # print("time for mis solving: {}".format(time.time() - t_tmp))
         return result
 
     def kamis_solve(self, n, edges, batch):
         """
         solve maximum independent set by KaMIS
         """
-        # t_tmp = time.time()
         adj = [[] for _ in range(n)]
         for edge in edges:
             adj[edge[0]].append(edge[1])
@@ -226,16 +207,12 @@ class Router_mixin:
                 ["mis/redumis", f"mis/tmp/mis_{batch}.in", "--output", f"mis/tmp/mis_{batch}.out", "--time_limit", "3600"], stdout=f)
         with open(f"mis/tmp/mis_{batch}.out", "r") as f:
             lines = f.readlines()
-        # print("time for mis solving: {}".format(time.time() - t_tmp))
         return [i for i, line in enumerate(lines) if line.startswith("1")]
 
     def compatible_2D(self, a, b):
         """
         check if move a and b can be performed simultaneously
         """
-    # a = (start_row, end_row, start_col, end_col)
-        #######
-        # return True 
         if a[0] == b[0] and a[1] != b[1]:
             return False
         if a[1] == b[1] and a[0] != b[0]:
@@ -253,16 +230,6 @@ class Router_mixin:
             return False
         if a[2] > b[2] and a[3] <= b[3]:
             return False
-
-        # if a[0] < b[0] and a[1] > b[1]:
-        #     return False
-        # if a[0] > b[0] and a[1] < b[1]:
-        #     return False
-
-        # if a[2] < b[2] and a[3] > b[3]:
-        #     return False
-        # if a[2] > b[2] and a[3] < b[3]:
-        #     return False
         return True
     
 
@@ -276,12 +243,6 @@ class Router_mixin:
                 "end_time": 0,
                 "init_locs": [ [i, self.qubit_mapping[0][i][0], self.qubit_mapping[0][i][1], self.qubit_mapping[0][i][2]]
                  for i in range(self.n_q)]
-                # "init_locs": [{
-                #     "id": i,
-                #     "a": self.qubit_mapping[0][i][0],
-                #     "c": self.qubit_mapping[0][i][2],
-                #     "r": self.qubit_mapping[0][i][1],
-                # } for i in range(self.n_q)]
             }
         )
 
@@ -291,7 +252,6 @@ class Router_mixin:
         list_1q_gate = [gate_1q for gate_1q in self.dict_g_1q_parent[-1]]
         result_gate = []
         for gate_info in list_1q_gate:
-            # collect qubit dependency
             set_qubit_dependency.add(self.qubit_dependency[gate_info[1]])
             self.qubit_dependency[gate_info[1]] = inst_idx
             result_gate.append({
@@ -309,8 +269,6 @@ class Router_mixin:
         """
         generate layers for row-by-row based atom transfer
         """
-        # seperate qubits in list_aod_qubit into multiple lists where qubits in one list can pick up simultaneously
-        # we use row-based pick up
         pickup_dict = dict() # key: array and row, value: a list of qubit in the same row
         for q in set_aod_qubit:
             x, y = self.architecture.exact_SLM_location_tuple(initial_mapping[q])
@@ -325,64 +283,51 @@ class Router_mixin:
             "qubit": [],
             "site": [],
         }
-        # process aod dependency
         inst_idx = len(self.result_json['instructions'])
 
         set_qubit_dependency = set()
         set_site_dependency = set()
         for dict_key in pickup_dict:
-            # collect set of aod qubits to pick up
             list_aod_qubits.append(pickup_dict[dict_key])
             row_begin_location = []
             row_end_location = []
             for q in pickup_dict[dict_key]:
-                # collect qubit begin location
                 row_begin_location.append([q, initial_mapping[q][0], initial_mapping[q][1], initial_mapping[q][2]])
-                # row_begin_location.append({
-                #     "id": q, 
-                #     "a": initial_mapping[q][0], 
-                #     "c": initial_mapping[q][2], 
-                #     "r": initial_mapping[q][1]
-                # })
-
-                # collect qubit end location
                 row_end_location.append([q, final_mapping[q][0], final_mapping[q][1], final_mapping[q][2]])
-                # row_end_location.append({
-                #     "id": q, 
-                #     "a": final_mapping[q][0], 
-                #     "c": final_mapping[q][2], 
-                #     "r": final_mapping[q][1]
-                # })
-                # process site dependency
                 site_key = (final_mapping[q][0], final_mapping[q][1], final_mapping[q][2])
                 if site_key in self.site_dependency:
                     set_site_dependency.add(self.site_dependency[site_key])
                 site_key = (initial_mapping[q][0], initial_mapping[q][1], initial_mapping[q][2])
                 self.site_dependency[site_key] = inst_idx
-                
-                # collect qubit dependency
                 set_qubit_dependency.add(self.qubit_dependency[q])
                 self.qubit_dependency[q] = inst_idx
             list_begin_location.append(row_begin_location)
             list_end_location.append(row_end_location)
         dependency["qubit"] = list(set_qubit_dependency)
         dependency["site"] = list(set_site_dependency)
-        self.write_rearrangement_instruction(inst_idx, list_aod_qubits, list_begin_location, list_end_location, dependency)
+        target_zone = None
+        for locs in list_end_location:
+            for _, a, r, c in locs:
+                ent_id = self.architecture.dict_SLM[a].entanglement_id
+                if ent_id != -1:
+                    target_zone = ent_id
+                    break
+            if target_zone is not None:
+                break
+        self.write_rearrangement_instruction(inst_idx, list_aod_qubits, list_begin_location, list_end_location, dependency, target_zone)
     
-    def write_rearrangement_instruction(self, inst_idx: int, aod_qubits: list, begin_location: list, end_location: list, dependency: dict):    
+    def write_rearrangement_instruction(self, inst_idx: int, aod_qubits: list, begin_location: list, end_location: list, dependency: dict, target_zone=None):    
         inst = {
                 "type": "rearrangeJob",
                 "id": inst_idx,
                 "aod_id": -1,
+                "target_zone": target_zone,
                 "aod_qubits": aod_qubits,
                 "begin_locs": begin_location,
                 "end_locs": end_location,
                 "dependency": dependency
             }
         inst["insts"] = self.expand_arrangement(inst)
-        # inst["aod_qubits"] = list(chain.from_iterable(inst["aod_qubits"]))
-        # inst["begin_locs"] = list(chain.from_iterable(inst["begin_locs"]))
-        # inst["end_locs"] = list(chain.from_iterable(inst["end_locs"]))
         self.result_json['instructions'].append(inst)
     
     def flatten_rearrangment_instruction(self):    
@@ -413,7 +358,6 @@ class Router_mixin:
             inst_idx = len(self.result_json['instructions'])
             for gate_idx in dict_gate_zone[rydberg_idx]:
                 gate = list_gate[gate_idx]
-                # collect qubit dependency
                 set_qubit_dependency.add(self.qubit_dependency[gate[0]])
                 self.qubit_dependency[gate[0]] = inst_idx
                 set_qubit_dependency.add(self.qubit_dependency[gate[1]])
@@ -428,7 +372,6 @@ class Router_mixin:
         result_gate = []
         set_qubit_dependency = set()
         for gate_info in list_1q_gate:
-            # collect qubit dependency
             set_qubit_dependency.add(self.qubit_dependency[gate_info[1]])
             self.qubit_dependency[gate_info[1]] = inst_idx
             result_gate.append({
@@ -439,19 +382,6 @@ class Router_mixin:
         dependency["qubit"] = list(set_qubit_dependency)
         if len(result_gate) > 0:
             self.write_1q_gate_instruction(inst_idx, result_gate, dependency, gate_mapping)
-
-        # result_gate = [{"id": list_gate_idx[i], "q0": list_gate[i][0], "q1": list_gate[i][1]} for i in range(len(list_gate))]
-        # dependency = { "qubit": [] }
-        # set_qubit_dependency = set()
-        # inst_idx = len(self.result_json['instructions'])
-        # for gate in list_gate:
-        #     # collect qubit dependency
-        #     set_qubit_dependency.add(self.qubit_dependency[gate[0]])
-        #     self.qubit_dependency[gate[0]] = inst_idx
-        #     set_qubit_dependency.add(self.qubit_dependency[gate[1]])
-        #     self.qubit_dependency[gate[1]] = inst_idx
-        # dependency["qubit"] = list(set_qubit_dependency)
-        # self.write_gate_instruction(inst_idx, result_gate, dependency)
     
     def write_gate_instruction(self, inst_idx: int, rydberg_idx: int, result_gate: list, dependency: dict):
         self.result_json['instructions'].append(
@@ -489,13 +419,11 @@ class Router_mixin:
             if self.result_json['instructions'][layer]["type"] == "rydberg":
                 break
             else:
-                # process a rearrangement layer
                 inst_idx = len(self.result_json['instructions'])
                 dependency = {
                     "qubit": [],
                     "site": [],
                 }
-                # process aod dependency
                 set_qubit_dependency = set()
                 set_site_dependency = set()
                 list_aod_qubits = self.result_json['instructions'][layer]["aod_qubits"]
@@ -505,27 +433,13 @@ class Router_mixin:
                     row_begin_location = []
                     row_end_location = []
                     for q in sub_list_qubits:
-                        # row_begin_location.append({
-                        #     "id": q, 
-                        #     "a": initial_mapping[q][0], 
-                        #     "c": initial_mapping[q][2], 
-                        #     "r": initial_mapping[q][1]
-                        # })
                         row_begin_location.append([q, initial_mapping[q][0], initial_mapping[q][1], initial_mapping[q][2]])
-                        # row_end_location.append({
-                        #     "id": q, 
-                        #     "a": final_mapping[q][0], 
-                        #     "c": final_mapping[q][2], 
-                        #     "r": final_mapping[q][1]
-                        # })
                         row_end_location.append([q, final_mapping[q][0], final_mapping[q][1], final_mapping[q][2]])
-                        # process site dependency
                         site_key = (final_mapping[q][0], final_mapping[q][1], final_mapping[q][2])
                         if site_key in self.site_dependency:
                             set_site_dependency.add(self.site_dependency[site_key])
                         site_key = (initial_mapping[q][0], initial_mapping[q][1], initial_mapping[q][2])
                         self.site_dependency[site_key] = inst_idx
-                        # collect qubit dependency
                         set_qubit_dependency.add(self.qubit_dependency[q])
                         self.qubit_dependency[q] = inst_idx
 
@@ -537,7 +451,8 @@ class Router_mixin:
                                                      list_aod_qubits,
                                                      list_begin_location,
                                                      list_end_location, 
-                                                     dependency)
+                                                     dependency,
+                                                     None)
                 
 
     def aod_assignment(self, id_layer_start: int):
@@ -548,10 +463,7 @@ class Router_mixin:
         id_layer_end = len(self.result_json['instructions'])
         duration_idx = 0
         list_gate_layer_idx = []
-        # for inst in self.result_json['instructions']:
-            # print(inst)
         for idx in range(id_layer_start, id_layer_end):
-            # print(f"{idx}: {self.result_json['instructions'][idx]['type']}")
             if self.result_json['instructions'][idx]["type"] != "rearrangeJob":
                 duration_idx = 1
                 list_gate_layer_idx.append(idx)
@@ -560,15 +472,11 @@ class Router_mixin:
             list_instruction_duration[duration_idx].append((duration, idx))
         list_instruction_duration[0] = sorted(list_instruction_duration[0], reverse=True)
         list_instruction_duration[1] = sorted(list_instruction_duration[1], reverse=True)
-        # assign instruction according to the duration in descending order
-        # print("list_instruction_duration")
-        # print(list_instruction_duration)
         for i in range(2):
             for item in list_instruction_duration[i]:
                 duration = item[0]
                 inst = self.result_json['instructions'][item[1]]
-                # print(inst)
-                begin_time, aod_id = heapq.heappop(self.aod_end_time)
+                begin_time, aod_id = self._pop_aod(inst)
                 begin_time = max(begin_time, self.get_begin_time(item[1], inst["dependency"]))
                 end_time = begin_time + duration
                 inst["dependency"]["aod"] = self.aod_dependency[aod_id]
@@ -576,37 +484,25 @@ class Router_mixin:
                 inst["begin_time"] = begin_time
                 inst["end_time"] = end_time
                 inst["aod_id"] = aod_id
-                heapq.heappush(self.aod_end_time, (end_time, aod_id))
-                # !
+                self._push_aod(aod_id, end_time)
                 for detail_inst in inst["insts"]: 
                     detail_inst["begin_time"] += begin_time
                     detail_inst["end_time"] += begin_time
                 if self.result_json["runtime"] < end_time:
                     self.result_json["runtime"] = end_time
-                # print("process instruction:")
-                # print(inst)
-                # input()
             if i == 0:
-                # print("list_gate_layer_idx")
-                # print(list_gate_layer_idx)
                 for gate_layer_idx in list_gate_layer_idx:    
-                    # ! laser scheduling
                     inst = self.result_json['instructions'][gate_layer_idx]
-                    # print(inst)
-                    # print(gate_layer_idx)
-                    # print(inst["dependency"])
                     begin_time = self.get_begin_time(gate_layer_idx, inst["dependency"])
                     if inst["type"] == "rydberg":
                         end_time = begin_time + self.architecture.time_rydberg
                     else:
-                        end_time = begin_time + (self.architecture.time_1qGate * len(inst["gates"])) + self.common_1q # for sequential gate execution
+                        end_time = begin_time + (self.architecture.time_1qGate * len(inst["gates"])) + self.common_1q
                     if self.result_json["runtime"] < end_time:
                         self.result_json["runtime"] = end_time
                     inst["begin_time"] = begin_time
                     inst["end_time"] = end_time
-                    # input()
             
-        # raise NotImplementedError
 
     def get_begin_time(self, cur_inst_idx: int, dependency: dict):
         begin_time = 0
@@ -616,25 +512,16 @@ class Router_mixin:
                 if begin_time < self.result_json['instructions'][inst_idx]["end_time"]:
                     begin_time = self.result_json['instructions'][inst_idx]["end_time"]
             else:
-                # print(dependency_type)
-                # print(dependency[dependency_type])
-                # if False:
                 if dependency_type == "site":
                     for inst_idx in dependency[dependency_type]:
                         if self.result_json['instructions'][inst_idx]["type"] == "rearrangeJob":
-                            # find the time that the instruction finish atom transfer
-                            # ! 
-                            # atom_transfer_finish_time = self.result_json['instructions'][inst_idx]["begin_time"] + 15
                             atom_transfer_finish_time = 0
                             for detail_inst in self.result_json['instructions'][inst_idx]["insts"]:
                                 inst_type = detail_inst["type"].split(":")[0]
                                 if inst_type == "activate":
                                     atom_transfer_finish_time = max(detail_inst["end_time"], atom_transfer_finish_time)
-                            # find the time until dropping of the qubits
-                            # atom_transfer_begin_time = 15
                             atom_transfer_begin_time = 0
                             for detail_inst in self.result_json['instructions'][cur_inst_idx]["insts"]:
-                                # print(detail_inst["type"].split(":"))
                                 inst_type = detail_inst["type"].split(":")[0]
                                 if inst_type == "deactivate":
                                     atom_transfer_begin_time = max(detail_inst["begin_time"], atom_transfer_begin_time)
@@ -642,10 +529,6 @@ class Router_mixin:
                             tmp_begin_time = atom_transfer_finish_time - atom_transfer_begin_time
                             if begin_time < tmp_begin_time:
                                 begin_time = tmp_begin_time
-                            # print("cur_inst_idx: ", cur_inst_idx)
-                            # print("atom_transfer_finish_time: ", atom_transfer_finish_time)
-                            # print("atom_transfer_begin_time: ", atom_transfer_begin_time)
-                            # print("begin time for site depend: ", tmp_begin_time)
                         else:
                             if begin_time < self.result_json['instructions'][inst_idx]["end_time"]:
                                 begin_time = self.result_json['instructions'][inst_idx]["end_time"]
@@ -658,13 +541,6 @@ class Router_mixin:
     def get_duration(self, inst: dict):
         list_detail_inst = inst["insts"]
         duration = 0
-        # # # !
-        # a = 0.00275
-        # d = 10
-        # unit_move = math.sqrt(d/a)
-        # t = unit_move + 2 * self.architecture.time_atom_transfer
-        # return t
-    
         for detail_inst in list_detail_inst:
             inst_type = detail_inst["type"].split(":")[0]
             detail_inst["begin_time"] = duration
@@ -676,16 +552,59 @@ class Router_mixin:
                 for row_begin, row_end in zip(detail_inst["row_y_begin"], detail_inst["row_y_end"]):
                     for col_begin, col_end in zip(detail_inst["col_x_begin"], detail_inst["col_x_end"]):
                         tmp = self.architecture.movement_duration(col_begin, row_begin, col_end, row_end)
-                        # tmp = min(self.architecture.movement_duration(col_begin, row_begin, col_end, row_end), unit_move) # !
                         if move_duration < tmp:
                             move_duration = tmp
                 detail_inst["end_time"] = move_duration + duration
                 duration += move_duration
             else:
                 raise ValueError
-        
-       
         return duration
+
+    def _init_aod_heaps(self):
+        n_aod = len(self.architecture.dict_AOD)
+        self.aod_dependency = [0 for _ in range(n_aod)]
+        self.aod_end_time = [(0, i) for i in range(n_aod)]
+        if not getattr(self, "zone_affinity", False):
+            self.zone_to_heap = None
+            self.free_aod_heap = None
+            return
+        y_zone = []
+        for zone in self.architecture.entanglement_zone:
+            slm = self.architecture.dict_SLM[zone[0]]
+            y_zone.append((slm.location[1], self.architecture.dict_SLM[zone[0]].entanglement_id))
+        y_zone = sorted(y_zone, key=lambda x: x[0])
+        zone_ids = [z for _, z in y_zone]
+        self.zone_to_heap = dict()
+        self.free_aod_heap = []
+        aod_ids = list(range(n_aod))
+        if len(zone_ids) > 0 and len(aod_ids) > 0:
+            self.zone_to_heap[zone_ids[0]] = [(0, aod_ids.pop(0))]
+        if len(zone_ids) > 1 and len(aod_ids) > 0:
+            self.zone_to_heap[zone_ids[1]] = [(0, aod_ids.pop(0))]
+        for a in aod_ids:
+            heapq.heappush(self.free_aod_heap, (0, a))
+
+    def _pop_aod(self, inst):
+        if self.zone_to_heap is None:
+            return heapq.heappop(self.aod_end_time)
+        target_zone = inst.get("target_zone", None)
+        if target_zone is not None and target_zone in self.zone_to_heap and len(self.zone_to_heap[target_zone]) > 0:
+            t, aid = heapq.heappop(self.zone_to_heap[target_zone])
+            return t, aid
+        if self.free_aod_heap and len(self.free_aod_heap) > 0:
+            return heapq.heappop(self.free_aod_heap)
+        return heapq.heappop(self.aod_end_time)
+
+    def _push_aod(self, aod_id, end_time):
+        if self.zone_to_heap is None:
+            heapq.heappush(self.aod_end_time, (end_time, aod_id))
+            return
+        for zid, heap in self.zone_to_heap.items():
+            ids = [aid for _, aid in heap]
+            if aod_id in ids:
+                heapq.heappush(heap, (end_time, aod_id))
+                return
+        heapq.heappush(self.free_aod_heap, (end_time, aod_id))
 
     def expand_arrangement(self, inst: dict):
         details = []  # all detailed instructions
@@ -698,27 +617,6 @@ class Router_mixin:
         for locs in inst["begin_locs"]:
             coords_row = []
             for loc in locs:
-                # coords_row.append({
-                #     "id": loc["id"],
-                #     "x": 
-                #         self.architecture.exact_SLM_location(
-                #             loc["a"],
-                #             loc["r"],
-                #             loc["c"],
-                #         )[0],
-                #     "y":
-                #         self.architecture.exact_SLM_location(
-                #             loc["a"],
-                #             loc["r"],
-                #             loc["c"],
-                #         )[1],
-                # })
-
-                # all_col_x.append(self.architecture.exact_SLM_location(
-                #     loc["a"],
-                #     loc["r"],
-                #     loc["c"],
-                # )[0])
                 exact_location = self.architecture.exact_SLM_location(loc[1], loc[2], loc[3])
                 coords_row.append({
                     "id": loc[0],
@@ -742,11 +640,6 @@ class Router_mixin:
         all_col_idx_sofar = [] # which col has been activated
         for row_id, locs in enumerate(inst["begin_locs"]): # each row
 
-            # row_y = self.architecture.exact_SLM_location(
-            #     locs[0]["a"],
-            #     locs[0]["r"],
-            #     locs[0]["c"],
-            # )[1]
             row_y = self.architecture.exact_SLM_location(
                 locs[0][1],
                 locs[0][2],
@@ -754,8 +647,6 @@ class Router_mixin:
             )[1]
             row_loc = [locs[0][1], locs[0][2]]
 
-            # before activation, adjust column position. This is necessary
-            # whenever cols are parked (the `parking` movement below).
             shift_back = {
                 "type": "move",
                 "move_type": "before",
@@ -773,7 +664,6 @@ class Router_mixin:
                 "end_coord": [],
             }
 
-            # activate one row and some columns
             activate = {
                 "type": "activate",
                 "row_id": [row_id, ],
@@ -785,11 +675,6 @@ class Router_mixin:
             }
 
             for j, loc in enumerate(locs):
-                # col_x = self.architecture.exact_SLM_location(
-                #     loc["a"],
-                #     loc["r"],
-                #     loc["c"],
-                # )[0]
                 col_x = self.architecture.exact_SLM_location(
                     loc[1],
                     loc[2],
@@ -798,21 +683,16 @@ class Router_mixin:
                 col_loc = [loc[1], loc[3]]
                 col_id = col_x_to_id[col_x]
                 if col_id not in all_col_idx_sofar:
-                    # the col hasn't been activated, so there's no shift back
-                    # and we need to activate it at `col_x`.`
                     all_col_idx_sofar.append(col_id)
                     activate["col_id"].append(col_id)
                     activate["col_x"].append(col_x)
                     activate["col_loc"].append(col_loc)
                 else:
-                    # the col has been activated, thus parked previously and we
-                    # need the shift back, but we do not activate again.
                     shift_back["col_id"].append(col_id)
                     shift_back["col_x_begin"].append(col_x + self.PARKING_DIST)
                     shift_back["col_x_end"].append(col_x)
                     shift_back["col_loc_begin"].append([-1, -1])
                     shift_back["col_loc_end"].append(col_loc)
-                    # since there's a shift, update the coords of the qubit
                     coords[row_id][j]["x"] = col_x
             
             shift_back["end_coord"] = deepcopy(coords)
@@ -822,11 +702,6 @@ class Router_mixin:
             details.append(activate)
 
             if row_id < len(inst["begin_locs"]) - 1:
-            # parking movement after the activation
-            # parking is required if we have activated some col, and there is
-            # some qubit we don't want to pick up at the intersection of this
-            # col and some future row to activate. We just always park here.
-            # the last parking is not needed since there's a big move after it.
                 parking = {
                     "type": "move",
                     "move_type": "after",
@@ -844,11 +719,6 @@ class Router_mixin:
                     "end_coord": [],
                 }
                 for j, loc in enumerate(locs):
-                    # col_x = self.architecture.exact_SLM_location(
-                    #     loc["a"],
-                    #     loc["r"],
-                    #     loc["c"],
-                    # )[0]
                     col_x = self.architecture.exact_SLM_location(
                         loc[1],
                         loc[2],
@@ -856,7 +726,6 @@ class Router_mixin:
                     )[0]
                     col_loc = [loc[1], loc[3]]
                     col_id = col_x_to_id[col_x]
-                    # all columns used in this row are parked after the activation
                     parking["col_id"].append(col_id)
                     parking["col_x_begin"].append(col_x)
                     parking["col_x_end"].append(col_x + self.PARKING_DIST)
@@ -895,18 +764,10 @@ class Router_mixin:
                 coords[row_id][0]["y"]
             )
             if init_coords[row_id][0]["y"] == coords[row_id][0]["y"]:
-                # AOD row is align with SLM row
                 big_move["row_loc_begin"].append([begin_locs[0][1], begin_locs[0][2]])
             else:
                 big_move["row_loc_begin"].append([-1, -1])
 
-            # big_move["row_y_end"].append(
-            #     self.architecture.exact_SLM_location(
-            #         end_locs[0]["a"],
-            #         end_locs[0]["r"],
-            #         end_locs[0]["c"],
-            #     )[1]
-            # )
             big_move["row_y_end"].append(
                 self.architecture.exact_SLM_location(
                     end_locs[0][1],
@@ -917,11 +778,6 @@ class Router_mixin:
             big_move["row_loc_end"].append([end_locs[0][1], end_locs[0][2]])
 
             for j, (begin_loc, end_loc) in enumerate(zip(begin_locs, end_locs)):
-                # col_x = self.architecture.exact_SLM_location(
-                #             begin_loc["a"],
-                #             begin_loc["r"],
-                #             begin_loc["c"],
-                #         )[0]
                 col_x = self.architecture.exact_SLM_location(
                             begin_loc[1],
                             begin_loc[2],
@@ -930,21 +786,12 @@ class Router_mixin:
                 col_id = col_x_to_id[col_x]
 
                 if col_id not in big_move["col_id"]:
-                    # the movement of this rol has not been recorded before
                     big_move["col_id"].append(col_id)
                     big_move["col_x_begin"].append(coords[row_id][j]["x"])
                     if init_coords[row_id][j]["x"] == coords[row_id][j]["x"]:
-                        # AOD col is align with SLM col
                         big_move["col_loc_begin"].append([begin_loc[1], begin_loc[3]])
                     else:
                         big_move["col_loc_begin"].append([-1, -1])
-                    # big_move["col_x_end"].append(
-                    #     self.architecture.exact_SLM_location(
-                    #         end_loc["a"],
-                    #         end_loc["r"],
-                    #         end_loc["c"],
-                    #     )[0]
-                    # )
                     big_move["col_x_end"].append(
                         self.architecture.exact_SLM_location(
                             end_loc[1],
@@ -954,23 +801,11 @@ class Router_mixin:
                     )
                     big_move["col_loc_end"].append([end_loc[1], end_loc[3]])
 
-                # whether or not the movement of this col has been considered
-                # before, we need to update the coords of the qubit.
-                # coords[row_id][j]["x"] = self.architecture.exact_SLM_location(
-                #                             end_loc["a"],
-                #                             end_loc["r"],
-                #                             end_loc["c"],
-                #                         )[0]
                 coords[row_id][j]["x"] = self.architecture.exact_SLM_location(
                                             end_loc[1],
                                             end_loc[2],
                                             end_loc[3],
                                         )[0]
-                # coords[row_id][j]["y"] = self.architecture.exact_SLM_location(
-                #     end_locs[0]["a"],
-                #     end_locs[0]["r"],
-                #     end_locs[0]["c"],
-                # )[1]
                 coords[row_id][j]["y"] = self.architecture.exact_SLM_location(
                     end_locs[0][1],
                     end_locs[0][2],
@@ -993,4 +828,3 @@ class Router_mixin:
             detail_inst["id"] = inst_counter
 
         return details
-                    

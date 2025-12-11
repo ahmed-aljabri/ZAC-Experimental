@@ -1,0 +1,10 @@
+{
+    "zone_batched_routing": false,
+    "locality_reorder": false,
+    "locality_cluster_split": false,
+    "interleave_reverse": false,
+    "keep_hot": false,
+    "keep_hot_horizon": 1,
+    "zone_affinity": false
+}
+

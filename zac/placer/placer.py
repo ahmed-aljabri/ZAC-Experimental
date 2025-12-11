@@ -99,7 +99,7 @@ class Placer_mixin:
         generate qubit initial layout
         """
         t_p = time.time()
-        intermediate_placer = VertexMatchingPlacer(deepcopy(self.qubit_mapping[0]))
+        intermediate_placer = VertexMatchingPlacer(deepcopy(self.qubit_mapping[0]), self.l2, self.keep_hot, self.keep_hot_penalty)
         # print("self.reuse_qubit")
         # print(self.reuse_qubit)
         intermediate_placer.run(self.architecture, self.qubit_mapping, self.gate_scheduling, self.dynamic_placement, self.reuse_qubit)

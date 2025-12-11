@@ -11,6 +11,12 @@ if __name__ == "__main__":
     args = parser.parse_args()
     with open(args.exp_spec, 'r') as f:
         exp_spec = json.load(f)
+    policy_overrides = dict()
+    if "policy_file" in exp_spec:
+        with open(exp_spec["policy_file"], 'r') as f:
+            policy_overrides = json.load(f)
+    if "policies" in exp_spec:
+        policy_overrides.update(exp_spec["policies"])
     benchmark_set = []
     for name in exp_spec["qasm_list"]:
         if os.path.isfile(name):
@@ -36,20 +42,23 @@ if __name__ == "__main__":
         filename = filename.split('.')[0]
         
         for zac_setting in list_zac_setting:
-            if zac_setting["arch_spec"] in dict_arch:
-                (arch, spec) = dict_arch[zac_setting["arch_spec"]]
+            setting = dict(policy_overrides)
+            setting.update(zac_setting)
+            arch_spec_path = setting["arch_spec"]
+            if arch_spec_path in dict_arch:
+                (arch, spec) = dict_arch[arch_spec_path]
             else:
-                with open(zac_setting["arch_spec"], 'r') as f:
+                with open(arch_spec_path, 'r') as f:
                     spec = json.load(f)
                 arch = Architecture(spec)
                 arch.preprocessing() 
-                dict_arch[zac_setting["arch_spec"]] = (arch, spec)
+                dict_arch[arch_spec_path] = (arch, spec)
 
             zac_setting["name"] = filename
 
             zac_compiler = ZAC()
-            zac_compiler.parse_setting(zac_setting)
-            zac_compiler.set_architecture_spec_path(zac_setting["arch_spec"])
+            zac_compiler.parse_setting(setting)
+            zac_compiler.set_architecture_spec_path(arch_spec_path)
 
             zac_compiler.set_architecture(arch)
             zac_compiler.set_program(benchmark)
