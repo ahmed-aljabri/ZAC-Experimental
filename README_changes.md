@@ -1,4 +1,4 @@
-# ZAC Compiler Tweaks (Project Notes)
+# ZAC Compiler Tweaks
 
 This README summarizes the compiler-side changes we added, where they live in the code, and how to rerun the experiments.
 
