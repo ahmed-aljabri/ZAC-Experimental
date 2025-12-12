@@ -4,17 +4,11 @@
 > Upstream: https://github.com/UCLA-VAST/ZAC  
 > This fork is not affiliated with or endorsed by the upstream authors.
 
-This fork preserves ZAC’s physics models and core compilation flow, and adds **optional, compiler-side policies** for research experiments (all disabled by default). Examples include zone-batched routing, locality-aware in-layer reordering, reverse interleaving, keep-hot bias with a horizon, and zone-affinity for multi-AOD.
+This fork modifies some compiler-side logic for research purposes (all disabled by default).
 
 For a detailed list of modifications and how to use them, see **`README_changes.md`**.
 
 ---
-
-## License & Attribution
-
-- Licensed under the **BSD-3-Clause** license; see **`LICENSE`** at the repository root.
----
-
 
 ## Getting Started
 - Use Python 3 in a virtual environment.
